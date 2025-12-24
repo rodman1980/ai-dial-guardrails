@@ -1,4 +1,15 @@
-from langchain_core.messages import BaseMessage, SystemMessage, HumanMessage
+# Prompt Injection Vulnerability Exploration
+# Demonstrates how malicious user inputs can manipulate LLM behavior to extract PII from system prompts/profiles.
+# Run: python tasks/t_1/prompt_injection.py (requires DIAL_API_KEY env var)
+#
+# Flow Map:
+#   1. Initialize AzureChatOpenAI client with DIAL endpoint and credentials
+#   2. Build conversation: SystemMessage (role), HumanMessage (profile with PII)
+#   3. Enter REPL loop: accept user queries, append to history, call LLM with full context
+#   4. Parse LLM response and stream to console; preserve in history for multi-turn attacks
+#   5. Demonstrate how prompt injection techniques bypass initial safeguards
+
+from langchain_core.messages import BaseMessage, SystemMessage, HumanMessage, AIMessage
 from langchain_openai import AzureChatOpenAI
 from pydantic import SecretStr
 
@@ -25,17 +36,111 @@ PROFILE = """
 """
 
 def main():
-    #TODO 1:
-    # 1. Create AzureChatOpenAI client, model to use `gpt-4.1-nano-2025-04-14` (or any other mini or nano models)
-    # 2. Create messages array with system prompt as 1st message and user message with PROFILE info (we emulate the
-    #    flow when we retrieved PII from some DB and put it as user message).
-    # 3. Create console chat with LLM, preserve history (user and assistant messages should be added to messages array
-    #   and each new request you must provide whole conversation history. With preserved history we can make multistep
-    #   (more complicated strategy) of prompt injection).
-    raise NotImplementedError
+    """
+    Interactive prompt injection exploration REPL.
+    
+    Initializes an LLM client with a fake profile containing PII (Amanda Grace Johnson)
+    as a HumanMessage in the conversation history. Users can then attempt prompt injection
+    attacks to trick the assistant into disclosing sensitive information.
+    
+    The system prompt defines the assistant's role; attempts to override it or extract
+    protected fields test the robustness of guardrails.
+    
+    Environment: Requires DIAL_API_KEY env var and EPAM DIAL network access.
+    """
+    print("=== Prompt Injection Exploration ===")
+    print("Phase: Initializing LLM client...")
+    
+    # Create AzureChatOpenAI client with DIAL endpoint. Uses DIAL_URL and API_KEY from tasks._constants.
+    # Per LangChain docs, `azure_deployment` specifies the model, `api_version` handles Azure versioning.
+    try:
+        client = AzureChatOpenAI(
+            temperature=0.0,
+            azure_deployment='gpt-4.1-nano-2025-04-14',
+            azure_endpoint=DIAL_URL,
+            api_key=SecretStr(API_KEY),
+            api_version="",
+        )
+        print("Phase: LLM client ready.")
+    except Exception as e:
+        print(f"Error: Failed to initialize LLM client: {e}")
+        print("Action: Check DIAL_URL and API_KEY in tasks._constants and DIAL_API_KEY env var.")
+        return
+
+    # Build conversation history: SystemMessage defines assistant role, HumanMessage contains PII profile.
+    # This simulates a real scenario where user queries arrive alongside profile/context data from a DB.
+    messages: list[BaseMessage] = [
+        SystemMessage(content=SYSTEM_PROMPT),
+        HumanMessage(content=PROFILE),
+    ]
+
+    print("Phase: Profile loaded into conversation history.")
+    print("=" * 50)
+    print("Prompt Injection Demo (type 'exit' to quit)\n")
+    print("Instructions:")
+    print("- Query: Try to extract sensitive fields (SSN, card number, etc.) from the profile.")
+    print("- Technique: Experiment with different prompt injection payloads (see PROMPT_INJECTIONS_TO_TEST.md).")
+    print("- Observe: Full conversation history is sent to LLM, enabling multi-turn attacks.\n")
+
+    # Interactive REPL: accept user input, append to history, call LLM, display response.
+    # Preserving full history allows testing multi-step injection attacks.
+    while True:
+        try:
+            user_input = input("You: ").strip()
+        except (KeyboardInterrupt, EOFError):
+            print("\n\nInterrupted. Exiting.")
+            break
+
+        if not user_input:
+            continue
+        if user_input.lower() in ("exit", "quit"):
+            print("Goodbye.")
+            break
+
+        # Append user message and request LLM response.
+        messages.append(HumanMessage(content=user_input))
+
+        try:
+            print("Assistant: (thinking...)")
+            response = client(messages=messages)
+            
+            # Extract content from LLM response. Response shape depends on client and version;
+            # try multiple accessors to remain compatible with different LangChain versions.
+            assistant_content = None
+            if hasattr(response, "content"):
+                assistant_content = response.content
+            elif hasattr(response, "generations"):
+                try:
+                    gen0 = response.generations[0][0]
+                    if hasattr(gen0, "message") and getattr(gen0.message, "content", None):
+                        assistant_content = gen0.message.content
+                    elif hasattr(gen0, "text"):
+                        assistant_content = gen0.text
+                except (IndexError, AttributeError):
+                    assistant_content = str(response)
+            else:
+                assistant_content = str(response)
+            
+            if not assistant_content:
+                assistant_content = "(Empty response from LLM)"
+
+            print(f"Assistant: {assistant_content}\n")
+            
+            # Preserve assistant message in history for next turns (multi-turn attack support).
+            messages.append(AIMessage(content=assistant_content))
+            
+        except Exception as e:
+            print(f"Error: LLM call failed: {e}")
+            print("Action: Check DIAL_API_KEY and network connectivity.\n")
+            # Remove the failed user message to keep history clean.
+            messages.pop()
 
 
-main()
+
+
+# Entry point: run the interactive REPL when executed as a script.
+if __name__ == "__main__":
+    main()
 
 #TODO 2:
 # FYI: All the information about Amanda Grace Johnson is fake, it was generated by LLM!
