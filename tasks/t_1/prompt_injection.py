@@ -127,7 +127,7 @@ def main():
 
         try:
             print("Assistant: (thinking...)")
-            response = client(messages=messages)
+            response = client.invoke(messages)
             
             # Extract content from LLM response. Response shape depends on client and version;
             # try multiple accessors to remain compatible with different LangChain versions.
