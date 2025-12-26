@@ -73,14 +73,19 @@ FILTER_SYSTEM_PROMPT = """You are a security-conscious content filter. Your task
 
 When redacting:
 1. Replace SSN with [SSN REDACTED]
-2. Replace credit card numbers with [CREDIT CARD REDACTED]
+2. Replace credit card numbers and any related credit-card information with [CREDIT CARD REDACTED]. This includes:
+   - full card numbers (e.g., 4 groups of 4 digits)
+   - expiration dates (MM/YY or MM/YYYY)
+   - CVV/CVC codes
+   - card types or brands when used to identify the card
+   - references to last-4 digits or masked card fragments
 3. Replace bank accounts with [BANK ACCOUNT REDACTED]
 4. Replace addresses with [ADDRESS REDACTED]
 5. Replace birthdates with [BIRTHDATE REDACTED]
 6. Replace income/salary information with [FINANCIAL INFO REDACTED]
 7. Replace driver's licenses with [DRIVER'S LICENSE REDACTED]
 
-Keep all safe information (name, phone, email) intact. Return only the redacted version."""
+Always redact any text that could be used to reconstruct or identify a credit card or its credentials. Keep all safe information (name, phone, email) intact. Return only the redacted version."""
 
 # Initialize LLM client for validation and generation
 print("[Init] Initializing Azure OpenAI client for output validation...")
@@ -123,15 +128,20 @@ def validate(llm_output: str) -> OutputValidationResult:
     # Create parser and get format instructions for the Pydantic model
     parser = PydanticOutputParser(pydantic_object=OutputValidationResult)
     format_instructions = parser.get_format_instructions()
-    
-    # Inject the format_instructions into the validation prompt so they are actually used.
-    # Keep {response_text} as a runtime placeholder — we fill response_text when invoking the chain.
-    filled_prompt_text = VALIDATION_PROMPT.format(format_instructions=format_instructions, response_text="{response_text}")
-    prompt = ChatPromptTemplate.from_template(filled_prompt_text)
+
+    # Build the ChatPromptTemplate directly from the template string. Do NOT use
+    # Python's str.format() here because `format_instructions` contains JSON-like
+    # braces which would be interpreted as format placeholders and break the
+    # template parsing. We pass `format_instructions` and `response_text` at
+    # invocation time instead.
+    prompt = ChatPromptTemplate.from_template(VALIDATION_PROMPT)
     
     try:
         chain = prompt | llm | parser
-        # Invoke validation chain on the LLM output
+        # Invoke validation chain on the LLM output, providing both variables
+        # referenced by the validation template: `response_text` and
+        # `format_instructions` (the latter contains JSON-like braces so must be
+        # passed as a variable rather than interpolated earlier).
         result = chain.invoke({"response_text": llm_output, "format_instructions": format_instructions})
         
         if result.contains_pii:
@@ -254,6 +264,17 @@ def main(soft_response: bool = False):
             
             # Phase 2: Validate output for PII leaks
             validation_result = validate(response_text)
+            # Print the full validation_result for debugging/inspection.
+            # Prefer Pydantic v2 model_dump_json(), fall back to .json() or str()
+            try:
+                if hasattr(validation_result, "model_dump_json"):
+                    print("[Validate Result] " + validation_result.model_dump_json(indent=2))
+                elif hasattr(validation_result, "json"):
+                    print("[Validate Result] " + validation_result.json(indent=2))
+                else:
+                    print("[Validate Result] " + str(validation_result))
+            except Exception:
+                print("[Validate Result] " + str(validation_result))
             
             # Phase 3: Handle validation result
             if not validation_result.contains_pii:
