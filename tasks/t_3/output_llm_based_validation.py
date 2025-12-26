@@ -124,8 +124,10 @@ def validate(llm_output: str) -> OutputValidationResult:
     parser = PydanticOutputParser(pydantic_object=OutputValidationResult)
     format_instructions = parser.get_format_instructions()
     
-    # Build validation prompt with injected format instructions
-    prompt = ChatPromptTemplate.from_template(VALIDATION_PROMPT)
+    # Inject the format_instructions into the validation prompt so they are actually used.
+    # Keep {response_text} as a runtime placeholder — we fill response_text when invoking the chain.
+    filled_prompt_text = VALIDATION_PROMPT.format(format_instructions=format_instructions, response_text="{response_text}")
+    prompt = ChatPromptTemplate.from_template(filled_prompt_text)
     
     try:
         chain = prompt | llm | parser
