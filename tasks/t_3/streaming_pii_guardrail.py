@@ -61,29 +61,54 @@ class PresidioStreamingPIIGuardrail:
             print(f"[Error] Language config failed: {e}")
             raise
         
-        # Step 2: Create NLP engine provider
+        # Step 2: Create NLP engine provider (robust across Presidio versions)
         try:
-            # Note: NlpEngineProvider API signature can vary by version
-            # Using type: ignore to suppress type checker errors
-            nlp_engine_provider = NlpEngineProvider(conf=language_config)  # type: ignore
-            
-            # Get NLP engine from provider
-            nlp_engine = getattr(nlp_engine_provider, 'nlp_engine', None)
+            nlp_engine = None
+            provider = None
+
+            # Try several common constructor signatures for NlpEngineProvider.
+            # Some Presidio releases expect `conf=...`, others `config=...`, others none.
+            attempts = [
+                ("conf", lambda: NlpEngineProvider(conf=language_config)),
+                ("config", lambda: NlpEngineProvider(config=language_config)),
+                ("positional", lambda: NlpEngineProvider(language_config)),
+                ("no_args", lambda: NlpEngineProvider()),
+            ]
+
+            for name, ctor in attempts:
+                try:
+                    provider = ctor()
+                    nlp_engine = getattr(provider, "nlp_engine", None) or getattr(provider, "_nlp_engine", None)
+                    if nlp_engine:
+                        print(f"[Init] NLP engine provider created (strategy={name})")
+                        break
+                except TypeError:
+                    # Constructor signature didn't match; try next option
+                    continue
+                except Exception as e:
+                    # Non-fatal: log and continue trying other strategies
+                    print(f"[Warn] NlpEngineProvider attempt '{name}' failed: {e}")
+                    continue
+
             if not nlp_engine:
-                # Try alternate attribute name
-                nlp_engine = getattr(nlp_engine_provider, '_nlp_engine', None)
-            if not nlp_engine:
-                raise ValueError("Could not extract nlp_engine from NlpEngineProvider")
-            print("[Init] NLP engine provider created")
+                # Fallback: attempt to rely on AnalyzerEngine's internal loading behavior.
+                print("[Warn] Could not extract nlp_engine from NlpEngineProvider. Falling back to AnalyzerEngine() which will try to load spaCy models if available.")
         except Exception as e:
+            # Keep error logs helpful and non-fatal; upstream code will try AnalyzerEngine() next.
             print(f"[Error] NLP provider init failed: {e}")
             print("[Info] Ensure: pip install presidio-analyzer presidio-anonymizer")
             print("[Info] And: python -m spacy download en_core_web_sm")
-            raise
-        
+            nlp_engine = None
+
         # Step 3: Create AnalyzerEngine with NLP engine for entity detection
         try:
-            self.analyzer = AnalyzerEngine(nlp_engine=nlp_engine)
+            # If we managed to get a Presidio nlp_engine, pass it explicitly.
+            # Otherwise, instantiate AnalyzerEngine() without parameters; it will
+            # attempt to initialize its own NLP engine (safer across Presidio versions).
+            if nlp_engine:
+                self.analyzer = AnalyzerEngine(nlp_engine=nlp_engine)
+            else:
+                self.analyzer = AnalyzerEngine()
             print("[Init] Presidio Analyzer engine initialized")
         except Exception as e:
             print(f"[Error] Analyzer init failed: {e}")
